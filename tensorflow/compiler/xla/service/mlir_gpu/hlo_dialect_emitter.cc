@@ -58,6 +58,8 @@ StatusOr<Value> InsertMlirOp(HloOpcode opcode, OpBuilder func_builder,
       return {func_builder.create<hlo::AndOp>(loc, rets, args, attrs)};
     case HloOpcode::kCeil:
       return {func_builder.create<hlo::CeilOp>(loc, rets, args, attrs)};
+    case HloOpcode::kComplex:
+      return {func_builder.create<hlo::ComplexOp>(loc, rets, args, attrs)};
     case HloOpcode::kCopy:
       return {func_builder.create<hlo::CopyOp>(loc, rets, args, attrs)};
     case HloOpcode::kCos:
@@ -66,6 +68,8 @@ StatusOr<Value> InsertMlirOp(HloOpcode opcode, OpBuilder func_builder,
       return {func_builder.create<hlo::DivOp>(loc, rets, args, attrs)};
     case HloOpcode::kExp:
       return {func_builder.create<hlo::ExpOp>(loc, rets, args, attrs)};
+    case HloOpcode::kImag:
+      return {func_builder.create<hlo::ImagOp>(loc, rets, args, attrs)};
     case HloOpcode::kLog:
       return {func_builder.create<hlo::LogOp>(loc, rets, args, attrs)};
     case HloOpcode::kMaximum:
@@ -76,6 +80,8 @@ StatusOr<Value> InsertMlirOp(HloOpcode opcode, OpBuilder func_builder,
       return {func_builder.create<hlo::MulOp>(loc, rets, args, attrs)};
     case HloOpcode::kNegate:
       return {func_builder.create<hlo::NegOp>(loc, rets, args, attrs)};
+    case HloOpcode::kReal:
+      return {func_builder.create<hlo::RealOp>(loc, rets, args, attrs)};
     case HloOpcode::kRemainder:
       return {func_builder.create<hlo::RemOp>(loc, rets, args, attrs)};
     case HloOpcode::kRsqrt:
@@ -174,6 +180,28 @@ Status HloDialectEmitter::HandleConstant(HloInstruction* instr) {
   auto const_value =
       builder_.create<hlo::ConstOp>(getLocation(instr), type, value);
   instruction_to_values_[instr] = const_value;
+  return Status::OK();
+}
+
+Status HloDialectEmitter::HandleGather(HloInstruction* instr) {
+  HloGatherInstruction* gather = static_cast<HloGatherInstruction*>(instr);
+  mlir::xla_hlo::GatherDimensionNumbers dimension_numbers =
+      xla::CreateGatherDimensionNumbers(gather->gather_dimension_numbers(),
+                                        builder_);
+  mlir::DenseIntElementsAttr slice_sizes = CreateDenseIntElementsAttrFromVector(
+      llvm::SmallVector<int64, 4>{gather->gather_slice_sizes().begin(),
+                                  gather->gather_slice_sizes().end()},
+      builder_);
+  mlir::BoolAttr indices_are_sorted =
+      builder_.getBoolAttr(gather->indices_are_sorted());
+
+  TF_ASSIGN_OR_RETURN(Type res_type, ConvertTensorShapeToType<RankedTensorType>(
+                                         instr->shape(), builder_));
+
+  instruction_to_values_[instr] = builder_.create<hlo::GatherOp>(
+      getLocation(instr), res_type, instruction_to_values_[instr->operand(0)],
+      instruction_to_values_[instr->operand(1)], dimension_numbers, slice_sizes,
+      indices_are_sorted);
   return Status::OK();
 }
 

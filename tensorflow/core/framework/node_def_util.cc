@@ -100,7 +100,7 @@ string AttrSlice::DebugString() const {
   return absl::StrJoin(attr_key_vals, ", ");
 }
 
-string SummarizeNodeDef(const NodeDef& node_def) {
+string SummarizeNodeDef(const NodeDef& node_def, int max_inputs_in_summary) {
   string ret = strings::StrCat(errors::FormatNodeNameForError(node_def.name()),
                                " = ", node_def.op(), "[");
   strings::StrAppend(&ret, SummarizeAttrsHelper(node_def, node_def.device()));
@@ -111,6 +111,10 @@ string SummarizeNodeDef(const NodeDef& node_def) {
   for (const string& input : node_def.input()) {
     if (!first) strings::StrAppend(&ret, ", ");
     first = false;
+    if (max_inputs_in_summary-- == 0) {
+      strings::StrAppend(&ret, "...");
+      break;
+    }
     strings::StrAppend(&ret, input);
   }
   strings::StrAppend(&ret, ")");
@@ -487,6 +491,11 @@ Status AddArgToSig(const NodeDefOrAttrSlice& node_or_attrs,
   if (arg_def.is_ref()) {
     // For all types that were added by this function call, make them refs.
     for (size_t i = original_size; i < sig->size(); ++i) {
+      if (IsRefType((*sig)[i])) {
+        return errors::InvalidArgument(
+            "Requested reference to a reference type: ",
+            arg_def.ShortDebugString());
+      }
       (*sig)[i] = MakeRefType((*sig)[i]);
     }
   }
@@ -500,7 +509,8 @@ Status InputTypeForNode(const NodeDef& node_def, const OpDef& op_def,
   DataTypeVector input_types;
   for (const auto& arg : op_def.input_arg()) {
     TF_RETURN_IF_ERROR(AddArgToSig(node_def, arg, &input_types));
-    if (input_types.size() > input_port) {
+    int input_types_size = input_types.size();
+    if (input_types_size > input_port) {
       const DataType dtype = input_types[input_port];
       *input_type = dtype;
       return Status::OK();
@@ -523,7 +533,8 @@ Status OutputTypeForNode(const NodeDef& node_def, const OpDef& op_def,
   DataTypeVector output_types;
   for (const auto& arg : op_def.output_arg()) {
     TF_RETURN_IF_ERROR(AddArgToSig(node_def, arg, &output_types));
-    if (output_types.size() > output_port) {
+    int output_types_size = output_types.size();
+    if (output_types_size > output_port) {
       const DataType dtype = output_types[output_port];
       *output_type = dtype;
       return Status::OK();

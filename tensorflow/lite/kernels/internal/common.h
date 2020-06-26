@@ -24,6 +24,7 @@ limitations under the License.
 #include <functional>
 
 #include "fixedpoint/fixedpoint.h"
+#include "tensorflow/lite/kernels/internal/cppmath.h"
 #include "tensorflow/lite/kernels/internal/optimized/neon_check.h"
 #include "tensorflow/lite/kernels/internal/types.h"
 
@@ -54,9 +55,12 @@ inline void GetActivationMinMax(FusedActivationFunctionType ac,
   }
 }
 
-inline float ActivationFunctionWithMinMax(float x, float output_activation_min,
-                                          float output_activation_max) {
-  return std::min(std::max(x, output_activation_min), output_activation_max);
+template <typename T>
+inline T ActivationFunctionWithMinMax(T x, T output_activation_min,
+                                      T output_activation_max) {
+  using std::max;
+  using std::min;
+  return min(max(x, output_activation_min), output_activation_max);
 }
 
 // Legacy function, left for compatibility only.
@@ -160,6 +164,27 @@ inline int32 MultiplyByQuantizedMultiplier(int32 x, int32 quantized_multiplier,
                              right_shift);
 }
 
+inline int32 MultiplyByQuantizedMultiplier(int64_t x,
+                                           int32 quantized_multiplier,
+                                           int shift) {
+  // Inputs:
+  // - quantized_multiplier has fixed point at bit 31
+  // - shift is -31 to +7 (negative for right shift)
+  //
+  // Assumptions: The following input ranges are assumed
+  // - quantize_scale>=0  (the usual range is (1<<30) to (1>>31)-1)
+  // - scaling is chosen so final scaled result fits in int32
+  // - input x is in the range -(1<<47) <= x < (1<<47)
+  assert(quantized_multiplier >= 0);
+  assert(shift >= -31 && shift < 8);
+
+  int32_t reduced_multiplier = (quantized_multiplier + (1 << 15)) >> 16;
+  int total_shift = 15 - shift;
+  x = (x * (int64_t)reduced_multiplier) + ((int64_t)1 << (total_shift - 1));
+  int32_t result = x >> total_shift;
+  return result;
+}
+
 template <typename T>
 int CountLeadingZeros(T integer_input) {
   static_assert(std::is_unsigned<T>::value,
@@ -199,6 +224,20 @@ inline int CountLeadingSignBits(T integer_input) {
 #endif
 }
 
+// Use "count leading zeros" helper functions to do a fast Floor(log_2(x)).
+template <typename Integer>
+inline Integer FloorLog2(Integer n) {
+  static_assert(std::is_integral<Integer>::value, "");
+  static_assert(std::is_signed<Integer>::value, "");
+  static_assert(sizeof(Integer) == 4 || sizeof(Integer) == 8, "");
+  TFLITE_CHECK_GT(n, 0);
+  if (sizeof(Integer) == 4) {
+    return 30 - CountLeadingSignBits(n);
+  } else {
+    return 62 - CountLeadingSignBits(n);
+  }
+}
+
 // generate INT16 LUT for function(), e.g., table exp(x) and 1/(1+x) used in
 // softmax
 inline void gen_lut(const std::function<double(double)>& func, double min,
@@ -208,19 +247,19 @@ inline void gen_lut(const std::function<double(double)>& func, double min,
   double step = (max - min) / (num - 1);
   double half_step = step / 2.0;
   for (int i = 0; i < num - 1; i++) {
-    double sample_val = std::round(func(min + i * step) * 32768.0);
+    double sample_val = TfLiteRound(func(min + i * step) * 32768.0);
     double midpoint_interp_val =
-        std::round((func(min + (i + 1) * step) * 32768.0 +
-                    std::round(func(min + i * step) * 32768.0)) /
-                   2.0);
+        TfLiteRound((func(min + (i + 1) * step) * 32768.0 +
+                     TfLiteRound(func(min + i * step) * 32768.0)) /
+                    2.0);
     double midpoint_val =
-        std::round(func(min + i * step + half_step) * 32768.0);
+        TfLiteRound(func(min + i * step + half_step) * 32768.0);
     double midpoint_err = midpoint_interp_val - midpoint_val;
-    double bias = std::round(midpoint_err / 2.0);
+    double bias = TfLiteRound(midpoint_err / 2.0);
     table[i] = std::min(std::max(sample_val - bias, -32768.0), 32767.0);
   }
   table[num - 1] =
-      std::min(std::max(std::round(func(max) * 32768.0), -32768.0), 32767.0);
+      std::min(std::max(TfLiteRound(func(max) * 32768.0), -32768.0), 32767.0);
 }
 
 // int16 func table lookup, e.g., lookup exp() and 1/(1+x) used in softmax
@@ -372,6 +411,23 @@ SaturatingRoundingMultiplyByPOTParam(
     gemmlowp::FixedPoint<tRawType, tIntegerBits> a, int exponent) {
   return gemmlowp::FixedPoint<tRawType, tIntegerBits>::FromRaw(
       SaturatingRoundingMultiplyByPOTParam(a.raw(), exponent));
+}
+
+// Convert int32 multiplier to int16 with rounding.
+inline void DownScaleInt32ToInt16Multiplier(int32_t multiplier_int32,
+                                            int16_t* multiplier_int16) {
+  TFLITE_DCHECK_GE(multiplier_int32, 0);
+  static constexpr int32_t kRoundingOffset = 1 << 15;
+  if (multiplier_int32 >=
+      std::numeric_limits<int32_t>::max() - kRoundingOffset) {
+    *multiplier_int16 = std::numeric_limits<int16_t>::max();
+    return;
+  }
+  const int32_t result = (multiplier_int32 + kRoundingOffset) >> 16;
+  TFLITE_DCHECK_LE(result << 16, multiplier_int32 + kRoundingOffset);
+  TFLITE_DCHECK_GT(result << 16, multiplier_int32 - kRoundingOffset);
+  *multiplier_int16 = result;
+  TFLITE_DCHECK_EQ(*multiplier_int16, result);
 }
 
 // Minimum output bits to accommodate log of maximum input range.  It actually

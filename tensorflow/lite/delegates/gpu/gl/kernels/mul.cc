@@ -84,6 +84,12 @@ absl::Status GenerateMultiplyScalarCode(
   auto muls = absl::get_if<Tensor<Linear, DataType::FLOAT32>>(&attr.param);
   auto scalar = absl::get_if<float>(&attr.param);
 
+  const auto* hwc_tensor =
+      absl::get_if<Tensor<HWC, DataType::FLOAT32>>(&attr.param);
+  if (hwc_tensor) {
+    return absl::UnimplementedError("Mul does not support HWC constant tensor");
+  }
+
   if (scalar) {
     *generated_code = {
         /*parameters=*/{{"scalar", *scalar}},
@@ -105,10 +111,9 @@ absl::Status GenerateMultiplyScalarCode(
         /*shared_variables=*/{},
         // Declare workload explicitly because shader depends on gid.z.
         /*workload=*/
-        uint3(
-            static_cast<int>(ctx.input_shapes[0][2]),
-            static_cast<int>(ctx.input_shapes[0][1]),
-            IntegralDivideRoundUp(static_cast<int>(ctx.input_shapes[0][3]), 4)),
+        uint3(static_cast<int>(ctx.input_shapes[0][2]),
+              static_cast<int>(ctx.input_shapes[0][1]),
+              DivideRoundUp(static_cast<int>(ctx.input_shapes[0][3]), 4)),
         /*workgroup=*/uint3(),
         /*source_code=*/"value_0 *= $mul_buffer[gid.z]$;",
         /*input=*/IOStructure::AUTO,

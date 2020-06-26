@@ -65,16 +65,16 @@ namespace tflite {
 class Flag {
  public:
   enum FlagType {
-    POSITIONAL = 0,
-    REQUIRED,
-    OPTIONAL,
+    kPositional = 0,
+    kRequired,
+    kOptional,
   };
 
   // The order of the positional flags is the same as they are added.
   // Positional flags are supposed to be required.
   template <typename T>
   static Flag CreateFlag(const char* name, T* val, const char* usage,
-                         FlagType flag_type = OPTIONAL) {
+                         FlagType flag_type = kOptional) {
     return Flag(
         name, [val](const T& v) { *val = v; }, *val, usage, flag_type);
   }
@@ -140,6 +140,9 @@ class Flags {
   // usage_text strings in flag_list[].
   static std::string Usage(const std::string& cmdline,
                            const std::vector<Flag>& flag_list);
+
+  // Return a space separated string containing argv[1, ..., argc-1].
+  static std::string ArgsToString(int argc, const char** argv);
 };
 }  // namespace tflite
 

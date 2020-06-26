@@ -215,7 +215,15 @@ def _yield_sorted_items(iterable):
   Yields:
     The iterable's (key, value) pairs, in order of sorted keys.
   """
-  if isinstance(iterable, _collections_abc.Mapping):
+  # Ordered to check common structure types (list, tuple, dict) first.
+  if isinstance(iterable, list):
+    for item in enumerate(iterable):
+      yield item
+  # namedtuples handled separately to avoid expensive namedtuple check.
+  elif type(iterable) == tuple:  # pylint: disable=unidiomatic-typecheck
+    for item in enumerate(iterable):
+      yield item
+  elif isinstance(iterable, (dict, _collections_abc.Mapping)):
     # Iterate through dictionaries in a deterministic order by sorting the
     # keys. Notice this means that we ignore the original order of `OrderedDict`
     # instances. This is intentional, to avoid potential bugs caused by mixing
@@ -231,7 +239,7 @@ def _yield_sorted_items(iterable):
       yield field, getattr(iterable, field)
   elif _is_composite_tensor(iterable):
     type_spec = iterable._type_spec  # pylint: disable=protected-access
-    yield type(iterable).__name__, type_spec._to_components(iterable)  # pylint: disable=protected-access
+    yield type_spec.value_type.__name__, type_spec._to_components(iterable)  # pylint: disable=protected-access
   elif _is_type_spec(iterable):
     # Note: to allow CompositeTensors and their TypeSpecs to have matching
     # structures, we need to use the same key string here.

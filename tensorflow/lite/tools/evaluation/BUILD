@@ -41,22 +41,23 @@ cc_library(
     copts = tflite_copts(),
     deps = [
         "//tensorflow/lite/c:common",
-        "//tensorflow/lite/delegates/nnapi:nnapi_delegate",
     ] + select({
         "//tensorflow:android": [
             "//tensorflow/lite/delegates/gpu:delegate",
+            "//tensorflow/lite/delegates/nnapi:nnapi_delegate",
         ],
         "//conditions:default": [],
     }) + select({
         "//tensorflow:android_arm": [
-            "//tensorflow/lite/experimental/delegates/hexagon:hexagon_delegate",
+            "//tensorflow/lite/delegates/hexagon:hexagon_delegate",
         ],
         "//tensorflow:android_arm64": [
-            "//tensorflow/lite/experimental/delegates/hexagon:hexagon_delegate",
+            "//tensorflow/lite/delegates/hexagon:hexagon_delegate",
         ],
         "//conditions:default": [],
     }) + select({
         "//tensorflow:fuchsia": [],
+        "//tensorflow:windows": [],
         "//conditions:default": [
             "//tensorflow/lite/delegates/xnnpack:xnnpack_delegate",
         ],
@@ -73,8 +74,8 @@ cc_library(
         "//tensorflow/lite/tools:command_line_flags",
         "//tensorflow/lite/tools:logging",
         "//tensorflow/lite/tools:tool_params",
-        "//tensorflow/lite/tools/benchmark:delegate_provider_hdr",
-        "//tensorflow/lite/tools/benchmark:tflite_execution_providers",
+        "//tensorflow/lite/tools/delegates:delegate_provider_hdr",
+        "//tensorflow/lite/tools/delegates:tflite_execution_providers",
         "//tensorflow/lite/tools/evaluation/proto:evaluation_stages_cc_proto",
     ],
 )

@@ -37,11 +37,10 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/call_inliner.h"
 #include "tensorflow/compiler/xla/service/conditional_simplifier.h"
 #include "tensorflow/compiler/xla/service/convolution_4d_expander.h"
-#include "tensorflow/compiler/xla/service/convolution_group_converter.h"
-#include "tensorflow/compiler/xla/service/depthwise_convolution_converter.h"
 #include "tensorflow/compiler/xla/service/dot_decomposer.h"
 #include "tensorflow/compiler/xla/service/dump.h"
 #include "tensorflow/compiler/xla/service/dynamic_index_splitter.h"
+#include "tensorflow/compiler/xla/service/dynamic_padder.h"
 #include "tensorflow/compiler/xla/service/flatten_call_graph.h"
 #include "tensorflow/compiler/xla/service/gpu/alias_passthrough_params.h"
 #include "tensorflow/compiler/xla/service/gpu/cudnn_batchnorm_rewriter.h"
@@ -60,12 +59,13 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/gpu/ir_emission_utils.h"
 #include "tensorflow/compiler/xla/service/gpu/ir_emitter_context.h"
 #include "tensorflow/compiler/xla/service/gpu/ir_emitter_unnested.h"
+#include "tensorflow/compiler/xla/service/gpu/launch_dimensions.h"
 #include "tensorflow/compiler/xla/service/gpu/llvm_gpu_backend/gpu_backend_lib.h"
 #include "tensorflow/compiler/xla/service/gpu/multi_output_fusion.h"
-#include "tensorflow/compiler/xla/service/gpu/partition_assignment.h"
 #include "tensorflow/compiler/xla/service/gpu/reduction_degenerate_dim_remover.h"
 #include "tensorflow/compiler/xla/service/gpu/reduction_dimension_grouper.h"
 #include "tensorflow/compiler/xla/service/gpu/reduction_layout_normalizer.h"
+#include "tensorflow/compiler/xla/service/gpu/reduction_splitter.h"
 #include "tensorflow/compiler/xla/service/gpu/stream_assignment.h"
 #include "tensorflow/compiler/xla/service/gpu/stream_executor_util.h"
 #include "tensorflow/compiler/xla/service/gpu/target_constants.h"
@@ -86,6 +86,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_subcomputation_unification.h"
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
+#include "tensorflow/compiler/xla/service/logistic_expander.h"
 #include "tensorflow/compiler/xla/service/rng_bit_generator_expander.h"
 #include "tensorflow/compiler/xla/service/rng_expander.h"
 #include "tensorflow/compiler/xla/service/slice_sinker.h"
@@ -152,23 +153,6 @@ Status GpuCompiler::OptimizeHloModule(
 
     pipeline.AddPass<Convolution4DExpander>();
 
-    auto cost_model = [](HloInstruction* conv) {
-      auto operand = conv->operand(0);
-      return operand->shape().dimensions(conv->convolution_dimension_numbers()
-                                             .input_batch_dimension()) ==
-             conv->batch_group_count();
-    };
-    pipeline.AddPass<DepthwiseConvolutionConverter>(cost_model);
-
-    // We use the ConvolutionGroupConverter to convert backprops of filter
-    // grouped convolutions into non-grouped equivalents.
-    auto batch_group_cost_model = [](HloInstruction*) { return false; };
-
-    pipeline.AddPass<ConvolutionGroupConverter>(
-        batch_group_cost_model,
-        /*convert_batch_groups_only=*/true,
-        /*filter_expansion=*/true);
-
     // Expand the sort op to support stable sorting if required.
     pipeline.AddPass<StableSortExpander>();
     // Convert BF16 operations to F32 operations so that the GPU backend can
@@ -176,29 +160,34 @@ Status GpuCompiler::OptimizeHloModule(
     // most ops.
     pipeline.AddPass<HloElementTypeConverter>(BF16, F32);
 
+    // If cudnn batchnorms are enabled, rewrite batchnorm HLOs to cudnn calls
+    // where possible.  Not every batchnorm op can be implemented as a call to
+    // cudnn, so decompose any remaining batchnorm ops into a soup of HLOs.
+    if (hlo_module->config().debug_options().xla_gpu_use_cudnn_batchnorm()) {
+      // Since BatchNorm inference is essentially pointwise operations, it is
+      // always advantageous to use kernel fusion rather than cudnn.
+      pipeline.AddPass<BatchNormExpander>(
+          /*rewrite_training_op=*/false,
+          /*rewrite_inference_op=*/true,
+          /*rewrite_grad_op=*/false);
+      pipeline.AddPass<CudnnBatchNormRewriter>();
+    }
+    pipeline.AddPass<BatchNormExpander>(
+        /*rewrite_training_op=*/true,
+        /*rewrite_inference_op=*/true,
+        /*rewrite_grad_op=*/true);
+
+    pipeline.AddPass<LogisticExpander>(
+        /*expansion_type=*/LogisticExpansionType::kExp);
+
+    pipeline.AddPass<DynamicPadder>();
+
     {
       auto& pass =
           pipeline.AddPass<HloPassFix<HloPassPipeline>>("simplification");
       pass.AddInvariantCheckerDebug<HloVerifier>(
           /*layout_sensitive=*/false,
           /*allow_mixed_precision=*/false);
-
-      // If cudnn batchnorms are enabled, rewrite batchnorm HLOs to cudnn calls
-      // where possible.  Not every batchnorm op can be implemented as a call to
-      // cudnn, so decompose any remaining batchnorm ops into a soup of HLOs.
-      if (hlo_module->config().debug_options().xla_gpu_use_cudnn_batchnorm()) {
-        // Since BatchNorm inference is essentially pointwise operations, it is
-        // always advantageous to use kernel fusion rather than cudnn.
-        pass.AddPass<BatchNormExpander>(
-            /*rewrite_training_op=*/false,
-            /*rewrite_inference_op=*/true,
-            /*rewrite_grad_op=*/false);
-        pass.AddPass<CudnnBatchNormRewriter>();
-      }
-      pass.AddPass<BatchNormExpander>(
-          /*rewrite_training_op=*/true,
-          /*rewrite_inference_op=*/true,
-          /*rewrite_grad_op=*/true);
 
       pipeline.AddPass<HloGetDimensionSizeRewriter>();
 
@@ -387,6 +376,7 @@ Status GpuCompiler::OptimizeHloPostLayoutAssignment(
   pipeline.AddPass<ReductionDegenerateDimRemover>();
   pipeline.AddPass<ReductionLayoutNormalizer>();
   pipeline.AddPass<ReductionDimensionGrouper>();
+  pipeline.AddPass<HloPassFix<ReductionSplitter>>();
 
   // The LayoutAssignment pass may leave behind kCopy instructions which are
   // duplicate or NOPs, so remove them with algebraic simplification and CSE.
@@ -409,6 +399,16 @@ Status GpuCompiler::OptimizeHloPostLayoutAssignment(
     pipeline.AddPass<HloPassFix<GpuTreeReductionRewriter>>();
   }
 
+  // GemmRewriter assumes that all transposes are folded into gemms, but,
+  // since commit 7d529df, this is not always true at this point.
+  // Therefore, rerun transpose folding.
+  pipeline.AddPass<TransposeFolding>(
+      [](const HloInstruction& dot,
+         const TransposeFolding::OperandIndices& candidate_operands) {
+        return IsMatrixMultiplication(dot) ? candidate_operands
+                                           : TransposeFolding::OperandIndices{};
+      },
+      TransposeFolding::NeverFoldTranspose);
   // Rewrite GEMMs into custom calls.
   pipeline.AddPass<GemmRewriter>();
 
@@ -508,11 +508,32 @@ StatusOr<std::unique_ptr<Executable>> GpuCompiler::RunBackend(
           /*allocate_buffers_for_constants=*/true,
           /*colorer=*/BufferAssigner::DefaultColorer(),
           /*must_not_live_out=*/{}, GetCanShareBuffer()));
+  VLOG(1) << "Buffer Assignment Stats "
+          << buffer_assignment->GetStats().ToString();
   DumpHloModuleIfEnabled(*module, *buffer_assignment, "after_optimizations");
 
+  GpuDeviceInfo gpu_device_info;
+  gpu_device_info.threads_per_block_limit =
+      stream_exec->GetDeviceDescription().threads_per_block_limit();
+  gpu_device_info.threads_per_warp =
+      stream_exec->GetDeviceDescription().threads_per_warp();
+  gpu_device_info.shared_memory_per_block =
+      stream_exec->GetDeviceDescription().shared_memory_per_block();
+
+  absl::optional<CudaComputeCapability> cuda_compute_capability =
+      [&]() -> absl::optional<CudaComputeCapability> {
+    CudaComputeCapability cuda_compute_capability;
+    stream_exec->GetDeviceDescription().cuda_compute_capability(
+        &cuda_compute_capability.cc_major, &cuda_compute_capability.cc_minor);
+    if (cuda_compute_capability.cc_major == -1) {
+      return absl::nullopt;
+    }
+    return cuda_compute_capability;
+  }();
+
   IrEmitterContext ir_emitter_context(
-      module.get(), buffer_assignment.get(), stream_exec->platform(),
-      &stream_exec->GetDeviceDescription(), &llvm_module);
+      module.get(), buffer_assignment.get(), stream_exec->platform()->Name(),
+      gpu_device_info, cuda_compute_capability, &llvm_module);
 
   HloComputation* entry_computation = module->entry_computation();
   IrEmitterUnnested ir_emitter(module->config(), entry_computation,

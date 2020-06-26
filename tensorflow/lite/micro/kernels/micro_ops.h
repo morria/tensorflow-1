@@ -46,6 +46,7 @@ TfLiteRegistration* Register_FLOOR();
 TfLiteRegistration* Register_FULLY_CONNECTED();
 TfLiteRegistration* Register_GREATER();
 TfLiteRegistration* Register_GREATER_EQUAL();
+TfLiteRegistration* Register_HARD_SWISH();
 TfLiteRegistration* Register_LESS();
 TfLiteRegistration* Register_LESS_EQUAL();
 TfLiteRegistration* Register_LOG();
@@ -80,6 +81,8 @@ TfLiteRegistration* Register_STRIDED_SLICE();
 TfLiteRegistration* Register_SUB();
 TfLiteRegistration* Register_SVDF();
 TfLiteRegistration* Register_UNPACK();
+TfLiteRegistration* Register_L2_NORMALIZATION();
+TfLiteRegistration* Register_TANH();
 
 }  // namespace micro
 }  // namespace ops

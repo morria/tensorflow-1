@@ -66,7 +66,6 @@ TfLiteDelegatePtr CreateTfLiteDelegate(const TfliteInferenceParams& params,
       return p;
     }
     case TfliteInferenceParams::NONE:
-      if (error_msg) *error_msg = "No delegate type is specified.";
       return TfLiteDelegatePtr(nullptr, [](TfLiteDelegate*) {});
     default:
       if (error_msg) {
@@ -79,7 +78,7 @@ TfLiteDelegatePtr CreateTfLiteDelegate(const TfliteInferenceParams& params,
 }
 
 DelegateProviders::DelegateProviders()
-    : delegates_list_(benchmark::GetRegisteredDelegateProviders()),
+    : delegates_list_(tools::GetRegisteredDelegateProviders()),
       delegates_map_([=]() -> std::unordered_map<std::string, int> {
         std::unordered_map<std::string, int> delegates_map;
         for (int i = 0; i < delegates_list_.size(); ++i) {
@@ -98,7 +97,13 @@ bool DelegateProviders::InitFromCmdlineArgs(int* argc, const char** argv) {
     auto one_flags = one->CreateFlags(&params_);
     flags.insert(flags.end(), one_flags.begin(), one_flags.end());
   }
-  return Flags::Parse(argc, argv, flags);
+
+  const bool parse_result = Flags::Parse(argc, argv, flags);
+  if (!parse_result) {
+    std::string usage = Flags::Usage(argv[0], flags);
+    TFLITE_LOG(ERROR) << usage;
+  }
+  return parse_result;
 }
 
 TfLiteDelegatePtr DelegateProviders::CreateDelegate(

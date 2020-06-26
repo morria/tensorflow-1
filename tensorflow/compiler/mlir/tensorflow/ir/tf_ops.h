@@ -30,7 +30,10 @@ limitations under the License.
 #include "mlir/IR/TypeUtilities.h"  // from @llvm-project
 #include "mlir/Interfaces/CallInterfaces.h"  // from @llvm-project
 #include "mlir/Interfaces/DerivedAttributeOpInterface.h"  // from @llvm-project
-#include "mlir/Interfaces/SideEffects.h"  // from @llvm-project
+#include "mlir/Interfaces/InferTypeOpInterface.h"  // from @llvm-project
+#include "mlir/Interfaces/SideEffectInterfaces.h"  // from @llvm-project
+#include "tensorflow/compiler/mlir/tensorflow/ir/tf_attributes.h"
+#include "tensorflow/compiler/mlir/tensorflow/ir/tf_op_interfaces.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_structs.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_traits.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_types.h"
@@ -54,6 +57,10 @@ class TensorFlowDialect : public Dialect {
   // This attribute marks if a function is stateful.
   // Returns the string description of stateful attribute.
   static StringRef GetStatefulAttrName() { return "tf.signature.is_stateful"; }
+
+  Attribute parseAttribute(DialectAsmParser &parser, Type type) const override;
+
+  void printAttribute(Attribute attr, DialectAsmPrinter &os) const override;
 
   // Parse a type registered to this dialect.
   Type parseType(DialectAsmParser &parser) const override;
@@ -86,7 +93,6 @@ class TensorFlowDialect : public Dialect {
 // both mutex.h and this header file.
 #undef mutex_lock
 
-#include "tensorflow/compiler/mlir/tensorflow/ir/tf_op_interfaces.h.inc"
 #define GET_OP_CLASSES
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h.inc"
 

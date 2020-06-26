@@ -32,6 +32,7 @@ limitations under the License.
 #include "tensorflow/lite/delegates/gpu/common/model.h"
 #include "tensorflow/lite/delegates/gpu/common/model_builder.h"
 #include "tensorflow/lite/delegates/gpu/common/model_transformer.h"
+#include "tensorflow/lite/delegates/gpu/common/quantization_util.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/gl/api2.h"
 #include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
@@ -70,17 +71,25 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate);
 
 class Delegate {
  public:
-  explicit Delegate(const TfLiteGpuDelegateOptionsV2* options) {
+  explicit Delegate(const TfLiteGpuDelegateOptionsV2* options)
+      : num_delegate_kernels_(0) {
     options_ = options ? *options : TfLiteGpuDelegateOptionsV2Default();
+    if (options_.max_delegated_partitions <= 0) {
+      options_.max_delegated_partitions = 1;
+    }
   }
 
   TfLiteDelegate* tflite_delegate() { return &delegate_; }
   const TfLiteGpuDelegateOptionsV2& options() const { return options_; }
 
-  bool IsQuantOpsAllowed() {
+  bool IsQuantOpsAllowed() const {
     return options_.experimental_flags &
            TFLITE_GPU_EXPERIMENTAL_FLAGS_ENABLE_QUANT;
   }
+  int MaxDelegatedPartitions() const {
+    return options_.max_delegated_partitions;
+  }
+  int num_delegate_kernels() const { return num_delegate_kernels_; }
 
  private:
   TfLiteDelegate delegate_ = {
@@ -93,13 +102,18 @@ class Delegate {
   };
 
   TfLiteGpuDelegateOptionsV2 options_;
+  int num_delegate_kernels_ = 0;
+
+  friend class DelegateKernel;
 };
 
 // Represent the execution of a subset of nodes on GPU.
 class DelegateKernel {
  public:
-  explicit DelegateKernel(const TfLiteGpuDelegateOptionsV2& options)
-      : options_(options) {}
+  explicit DelegateKernel(Delegate* delegate) : delegate_(delegate) {
+    ++delegate_->num_delegate_kernels_;
+  }
+  ~DelegateKernel() { --delegate_->num_delegate_kernels_; }
 
   absl::Status Prepare(TfLiteContext* context,
                        const TfLiteDelegateParams* delegate_params) {
@@ -115,20 +129,29 @@ class DelegateKernel {
 
     std::unique_ptr<InferenceBuilder> builder;
     bool graph_is_destroyed;
-    absl::Status status =
-        InitializeOpenClApi(&graph, &builder, &graph_is_destroyed);
-    if (!status.ok()) {
-      TF_LITE_KERNEL_LOG(context, std::string(status.message()).c_str());
-      context->ReportError(context, "Falling back to OpenGL");
-
-      // Graph need to be re-created because it is moved above.
-      GraphFloat32 graph2;
-      if (graph_is_destroyed) {
-        RETURN_IF_ERROR(InitializeGraph(context, delegate_params, &graph2,
-                                        &input_refs, &output_refs));
-      }
+    const int experimental_flags = delegate_->options().experimental_flags;
+    if (experimental_flags & TFLITE_GPU_EXPERIMENTAL_FLAGS_CL_ONLY) {
       RETURN_IF_ERROR(
-          InitializeOpenGlApi(graph_is_destroyed ? &graph2 : &graph, &builder));
+          InitializeOpenClApi(&graph, &builder, &graph_is_destroyed));
+    } else if (experimental_flags & TFLITE_GPU_EXPERIMENTAL_FLAGS_GL_ONLY) {
+      RETURN_IF_ERROR(InitializeOpenGlApi(&graph, &builder));
+    } else {
+      // By default, we try CL first & fall back to GL if that fails.
+      absl::Status status =
+          InitializeOpenClApi(&graph, &builder, &graph_is_destroyed);
+      if (!status.ok()) {
+        TF_LITE_KERNEL_LOG(context, std::string(status.message()).c_str());
+        TF_LITE_KERNEL_LOG(context, "Falling back to OpenGL");
+
+        // Graph needs to be re-created because it is moved above.
+        GraphFloat32 graph2;
+        if (graph_is_destroyed) {
+          RETURN_IF_ERROR(InitializeGraph(context, delegate_params, &graph2,
+                                          &input_refs, &output_refs));
+        }
+        RETURN_IF_ERROR(InitializeOpenGlApi(
+            graph_is_destroyed ? &graph2 : &graph, &builder));
+      }
     }
 
     // At this point tflite didn't allocate tensors yet, therefore, collect
@@ -188,12 +211,14 @@ class DelegateKernel {
 
     const bool is_dequant_required = !quant_conversion_map_.empty();
     if (is_dequant_required) {
-      RETURN_IF_ERROR(DequantizeInputs(context));
+      RETURN_IF_ERROR(
+          DequantizeInputs(context, input_indices_, quant_conversion_map_));
     }
     RETURN_IF_ERROR(SetInputsAndOutputs(context));
     RETURN_IF_ERROR(runner_->Run());
     if (is_dequant_required) {
-      RETURN_IF_ERROR(QuantizeOutputs(context));
+      RETURN_IF_ERROR(
+          QuantizeOutputs(context, output_indices_, quant_conversion_map_));
     }
     return absl::OkStatus();
   }
@@ -232,8 +257,7 @@ class DelegateKernel {
                                std::vector<uint32_t>* input_refs,
                                std::vector<uint32_t>* output_refs) {
     quant_conversion_map_.clear();
-    if (options_.experimental_flags &
-        TFLITE_GPU_EXPERIMENTAL_FLAGS_ENABLE_QUANT) {
+    if (delegate_->IsQuantOpsAllowed()) {
       RETURN_IF_ERROR(BuildFinalModel(context, delegate_params, graph,
                                       &quant_conversion_map_));
     } else {
@@ -242,79 +266,15 @@ class DelegateKernel {
 
     input_refs->clear();
     output_refs->clear();
-    const auto& inputs = graph->inputs();
+    const auto inputs = graph->inputs();
     input_refs->reserve(inputs.size());
     for (const auto& input : inputs) {
       input_refs->push_back(input->tensor.ref);
     }
-    const auto& outputs = graph->outputs();
+    const auto outputs = graph->outputs();
     output_refs->reserve(outputs.size());
     for (const auto& output : outputs) {
       output_refs->push_back(output->tensor.ref);
-    }
-
-    return absl::OkStatus();
-  }
-
-  // TODO(b/150798231): Refactor these two into common utils when generalizing
-  // to other backends.
-
-  // Dequantizes input tensors pre-inference, leaving float tensors intact.
-  absl::Status DequantizeInputs(TfLiteContext* context) {
-    for (auto index : input_indices_) {
-      if (quant_conversion_map_.find(index) == quant_conversion_map_.end()) {
-        continue;
-      }
-      int original_tensor_idx = quant_conversion_map_[index];
-      const TfLiteTensor& dequantized_tflite_tensor = context->tensors[index];
-      const TfLiteTensor& original_tflite_tensor =
-          context->tensors[original_tensor_idx];
-      DequantizationParams op_params;
-      op_params.zero_point = original_tflite_tensor.params.zero_point;
-      op_params.scale = original_tflite_tensor.params.scale;
-      if (original_tflite_tensor.type == kTfLiteInt8) {
-        optimized_ops::Dequantize(op_params,
-                                  GetTensorShape(&original_tflite_tensor),
-                                  original_tflite_tensor.data.int8,
-                                  GetTensorShape(&original_tflite_tensor),
-                                  dequantized_tflite_tensor.data.f);
-      } else if (original_tflite_tensor.type == kTfLiteUInt8) {
-        optimized_ops::Dequantize(op_params,
-                                  GetTensorShape(&original_tflite_tensor),
-                                  original_tflite_tensor.data.uint8,
-                                  GetTensorShape(&original_tflite_tensor),
-                                  dequantized_tflite_tensor.data.f);
-      }
-    }
-    return absl::OkStatus();
-  }
-
-  // Quantizes output tensors post-inference, leaving float tensors intact.
-  absl::Status QuantizeOutputs(TfLiteContext* context) {
-    for (auto index : output_indices_) {
-      if (quant_conversion_map_.find(index) == quant_conversion_map_.end()) {
-        continue;
-      }
-      int original_tensor_idx = quant_conversion_map_[index];
-      const TfLiteTensor& dequantized_tflite_tensor = context->tensors[index];
-      const TfLiteTensor& original_tflite_tensor =
-          context->tensors[original_tensor_idx];
-      tflite::QuantizationParams op_params;
-      op_params.zero_point = original_tflite_tensor.params.zero_point;
-      op_params.scale = original_tflite_tensor.params.scale;
-      if (original_tflite_tensor.type == kTfLiteInt8) {
-        optimized_ops::AffineQuantize(op_params,
-                                      GetTensorShape(&original_tflite_tensor),
-                                      dequantized_tflite_tensor.data.f,
-                                      GetTensorShape(&original_tflite_tensor),
-                                      original_tflite_tensor.data.int8);
-      } else if (original_tflite_tensor.type == kTfLiteUInt8) {
-        optimized_ops::AffineQuantize(op_params,
-                                      GetTensorShape(&original_tflite_tensor),
-                                      dequantized_tflite_tensor.data.f,
-                                      GetTensorShape(&original_tflite_tensor),
-                                      original_tflite_tensor.data.uint8);
-      }
     }
 
     return absl::OkStatus();
@@ -328,22 +288,23 @@ class DelegateKernel {
     cl::InferenceEnvironmentProperties properties;
     RETURN_IF_ERROR(cl::NewInferenceEnvironment(env_options, &cl_environment_,
                                                 &properties));
+    auto delegate_options = delegate_->options();
     cl::InferenceOptions options;
     // If is_precision_loss_allowed == -1, then just use priorities instead
     // of paying attention to is_precision_loss_allowed value.
-    if (options_.is_precision_loss_allowed == -1) {
-      options.priority1 = ToPriority(options_.inference_priority1);
-      options.priority2 = ToPriority(options_.inference_priority2);
-      options.priority3 = ToPriority(options_.inference_priority3);
+    if (delegate_options.is_precision_loss_allowed == -1) {
+      options.priority1 = ToPriority(delegate_options.inference_priority1);
+      options.priority2 = ToPriority(delegate_options.inference_priority2);
+      options.priority3 = ToPriority(delegate_options.inference_priority3);
     } else {
       // Users set is_precision_loss_allowed explicitly, thus use it explicitly.
-      if (options_.is_precision_loss_allowed == 0) {
+      if (delegate_options.is_precision_loss_allowed == 0) {
         options.priority1 = InferencePriority::MAX_PRECISION;
       } else {
         options.priority1 = InferencePriority::MIN_LATENCY;
       }
     }
-    options.usage = ToUsage(options_.inference_preference);
+    options.usage = ToUsage(delegate_options.inference_preference);
     *graph_is_destroyed = true;
     RETURN_IF_ERROR(cl_environment_->NewInferenceBuilder(
         options, std::move(*graph), builder));
@@ -358,11 +319,12 @@ class DelegateKernel {
     gl::InferenceEnvironmentProperties properties;
     RETURN_IF_ERROR(
         NewInferenceEnvironment(env_options, &gl_environment_, &properties));
+    auto delegate_options = delegate_->options();
     gl::InferenceOptions options;
-    options.usage = ToUsage(options_.inference_preference);
-    options.priority1 = ToPriority(options_.inference_priority1);
-    options.priority2 = ToPriority(options_.inference_priority2);
-    options.priority3 = ToPriority(options_.inference_priority3);
+    options.usage = ToUsage(delegate_options.inference_preference);
+    options.priority1 = ToPriority(delegate_options.inference_priority1);
+    options.priority2 = ToPriority(delegate_options.inference_priority2);
+    options.priority3 = ToPriority(delegate_options.inference_priority3);
     RETURN_IF_ERROR(gl_environment_->NewInferenceBuilder(std::move(*graph),
                                                          options, builder));
     enforce_same_thread_ = true;
@@ -371,9 +333,8 @@ class DelegateKernel {
     return absl::OkStatus();
   }
 
-  // Shared across all DelegateKernel instances, passed by the Delegate
-  // instance.
-  const TfLiteGpuDelegateOptionsV2& options_;
+  // The Delegate instance that's shared across all DelegateKernel instances.
+  Delegate* const delegate_;  // doesn't own the memory.
   std::unique_ptr<cl::InferenceEnvironment> cl_environment_;
   std::unique_ptr<gl::InferenceEnvironment> gl_environment_;
   std::unique_ptr<InferenceRunner> runner_;
@@ -405,11 +366,11 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
         // Everything below should happen in prepare function call, but TFLite
         // for whatever reason forbids that.
         auto gpu_delegate_kernel =
-            absl::make_unique<DelegateKernel>(gpu_delegate->options());
+            absl::make_unique<DelegateKernel>(gpu_delegate);
         const auto status = gpu_delegate_kernel->Prepare(context, params);
         if (!status.ok()) {
-          context->ReportError(context, "TfLiteGpuDelegate Init: %s",
-                               std::string(status.message()).c_str());
+          TF_LITE_KERNEL_LOG(context, "TfLiteGpuDelegate Init: %s",
+                             std::string(status.message()).c_str());
           return nullptr;
         }
         return gpu_delegate_kernel.release();
@@ -421,7 +382,7 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
       // .prepare
       [](TfLiteContext* context, TfLiteNode* node) -> TfLiteStatus {
         if (!node->user_data) {
-          context->ReportError(
+          TF_LITE_KERNEL_LOG(
               context,
               "TfLiteGpuDelegate Prepare: delegate is not initialized");
           return kTfLiteError;
@@ -443,8 +404,8 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
       [](TfLiteContext* context, TfLiteNode* node) -> TfLiteStatus {
         const auto status = GetDelegateKernel(node)->Invoke(context);
         if (!status.ok()) {
-          context->ReportError(context, "TfLiteGpuDelegate Invoke: %s",
-                               std::string(status.message()).c_str());
+          TF_LITE_KERNEL_LOG(context, "TfLiteGpuDelegate Invoke: %s",
+                             std::string(status.message()).c_str());
           return kTfLiteError;
         }
         return kTfLiteOk;
@@ -454,10 +415,15 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
       "TfLiteGpuDelegateV2",  // .custom_name
       1,                      // .version
   };
-  TfLiteIntArray* ops_to_replace = GetOpsToReplace(
-      context, /*allow_quant_ops=*/GetDelegate(delegate)->IsQuantOpsAllowed());
+
+  auto* gpu_delegate = GetDelegate(delegate);
+  TfLiteIntArray* ops_to_replace =
+      GetOpsToReplace(context, gpu_delegate->IsQuantOpsAllowed(),
+                      gpu_delegate->MaxDelegatedPartitions());
   const auto status = context->ReplaceNodeSubsetsWithDelegateKernels(
       context, kRegistration, ops_to_replace, delegate);
+  TFLITE_LOG_PROD(TFLITE_LOG_INFO, "Created %d GPU delegate kernels.",
+                  gpu_delegate->num_delegate_kernels());
   TfLiteIntArrayFree(ops_to_replace);
   return status;
 }
@@ -467,15 +433,17 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
 }  // namespace tflite
 
 TfLiteGpuDelegateOptionsV2 TfLiteGpuDelegateOptionsV2Default() {
-  TfLiteGpuDelegateOptionsV2 options;
-  // set it to -1 to detect whether it was later adjusted.
-  options.is_precision_loss_allowed = -1;
-  options.inference_preference =
-      TFLITE_GPU_INFERENCE_PREFERENCE_FAST_SINGLE_ANSWER;
-  options.inference_priority1 = TFLITE_GPU_INFERENCE_PRIORITY_MAX_PRECISION;
-  options.inference_priority2 = TFLITE_GPU_INFERENCE_PRIORITY_AUTO;
-  options.inference_priority3 = TFLITE_GPU_INFERENCE_PRIORITY_AUTO;
-  options.experimental_flags = TFLITE_GPU_EXPERIMENTAL_FLAGS_NONE;
+  TfLiteGpuDelegateOptionsV2 options = {
+      // set it to -1 to detect whether it was later adjusted.
+      .is_precision_loss_allowed = -1,
+      .inference_preference =
+          TFLITE_GPU_INFERENCE_PREFERENCE_FAST_SINGLE_ANSWER,
+      .inference_priority1 = TFLITE_GPU_INFERENCE_PRIORITY_MAX_PRECISION,
+      .inference_priority2 = TFLITE_GPU_INFERENCE_PRIORITY_AUTO,
+      .inference_priority3 = TFLITE_GPU_INFERENCE_PRIORITY_AUTO,
+      .experimental_flags = TFLITE_GPU_EXPERIMENTAL_FLAGS_NONE,
+      .max_delegated_partitions = 1,
+  };
   return options;
 }
 
