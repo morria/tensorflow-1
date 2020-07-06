@@ -369,7 +369,8 @@ LogicalResult ComputeInputsRequiredForOutput(ValuePort value_port,
   // Note: this focusses only on the trivial pack op case and this could be
   // generalized.
   if (auto pack_op = dyn_cast<TF::PackOp>(op)) {
-    if (pack_op.getType().cast<TensorType>().getRank() != 1) return failure();
+    auto type = pack_op.getType().cast<TensorType>();
+    if (!type.hasRank() || type.getRank() != 1) return failure();
     if (port.size() != 2) return failure();
     assert(port[0] == 0);
     ValuePort req(pack_op.getOperand(port[1]));
@@ -405,7 +406,8 @@ Attribute ComputeOutputComponent(const ValuePort& value_port,
   // Note: this focusses only on the trivial pack op case and this could be
   // generalized.
   if (auto pack_op = dyn_cast<TF::PackOp>(op)) {
-    if (pack_op.getType().cast<TensorType>().getRank() != 1) return nullptr;
+    TensorType type = pack_op.getType().cast<TensorType>();
+    if (!type.hasRank() || type.getRank() != 1) return nullptr;
     if (port.size() != 2 || port[0] != 0) return nullptr;
     ValuePort op_port(op->getOperand(port[1]));
     return values(op_port);
@@ -1036,6 +1038,13 @@ LogicalResult ShapeInference::PropagateShapeIntoAttachedFunctions(
     return PropagateShapeToFunctions(
         module, drop_begin(if_op.getOperandTypes(), 1),
         {if_op.then_branch(), if_op.else_branch()}, max_iteration);
+  } else if (auto case_op = dyn_cast<TF::CaseOp>(op)) {
+    SmallVector<StringRef, 4> branches;
+    for (Attribute branch : case_op.branches())
+      branches.push_back(branch.cast<FlatSymbolRefAttr>().getValue());
+    return PropagateShapeToFunctions(module,
+                                     drop_begin(case_op.getOperandTypes(), 1),
+                                     branches, max_iteration);
   } else if (auto while_op = dyn_cast<TF::WhileOp>(op)) {
     return PropagateShapeToFunctions(module, while_op.getOperandTypes(),
                                      {while_op.cond(), while_op.body()},
