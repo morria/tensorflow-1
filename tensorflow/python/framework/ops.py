@@ -24,6 +24,7 @@ import sys
 import threading
 import types
 
+from typing import Generic, TypeVar
 import numpy as np
 import six
 from six.moves import map  # pylint: disable=redefined-builtin
@@ -254,9 +255,19 @@ def disable_tensor_equality():
   Tensor._USE_EQUALITY = False  # pylint: disable=protected-access
 
 
+DataType = TypeVar("DataType", bound=dtypes.DType)
+
+# TODO(rahulkamat): Remove this and make Tensor a generic class
+# once compatibility with Python 2 is dropped.
+if sys.version_info[0] >= 3:
+  TensorTypeBase = Generic[DataType]
+else:
+  TensorTypeBase = object
+
+
 # TODO(mdan): This object should subclass Symbol, not just Tensor.
 @tf_export("Tensor")
-class Tensor(internal.NativeObject, core_tf_types.Tensor):
+class Tensor(internal.NativeObject, core_tf_types.Tensor, TensorTypeBase):
   """A tensor is a multidimensional array of elements represented by a
 
   `tf.Tensor` object.  All elements are of a single known data type.
@@ -2605,6 +2616,8 @@ class RegisterGradient(object):
   that defines the operation.
   """
 
+  __slots__ = ["_op_type"]
+
   def __init__(self, op_type):
     """Creates a new decorator with `op_type` as the Operation type.
 
@@ -2701,6 +2714,8 @@ class OpStats(object):
 
   """
 
+  __slots__ = ["_statistic_type", "_value"]
+
   def __init__(self, statistic_type, value=None):
     """Sets up the initial placeholders for the statistics."""
     self.statistic_type = statistic_type
@@ -2779,6 +2794,8 @@ class RegisterStatistics(object):
   back the calculated amount in doohickey.value, or None if it's not defined.
 
   """
+
+  __slots__ = ["_op_type", "_statistic_type"]
 
   def __init__(self, op_type, statistic_type):
     """Saves the `op_type` as the `Operation` type."""
@@ -5198,6 +5215,8 @@ class enable_auto_cast_variables(object):
   `dtype` is floating-point. Otherwise, `AutoCastVariable`s will not be cast.
   """
 
+  __slots__ = ["_dtype", "_graph", "_prev_read_dtype"]
+
   def __init__(self, dtype, graph=None):
     if dtype and not dtype.is_floating:
       self._dtype = None
@@ -6551,6 +6570,8 @@ class name_scope_v1(object):  # pylint: disable=invalid-name
   ```
   """
 
+  __slots__ = ["_name", "_name_scope"]
+
   @property
   def name(self):
     return self._name
@@ -6603,6 +6624,8 @@ class name_scope_v2(object):
   made unique by appending `_n`. For example, calling `my_op` the second time
   will generate `MyOp_1/a`, etc.
   """
+
+  __slots__ = ["_name", "_exit_fns"]
 
   def __init__(self, name):
     """Initialize the context manager.
@@ -6659,6 +6682,13 @@ class name_scope_v2(object):
   def __exit__(self, type_arg, value_arg, traceback_arg):
     self._exit_fns.pop()(type_arg, value_arg, traceback_arg)
     return False  # False values do not suppress exceptions
+
+  def __getstate__(self):
+    return self._name, self._exit_fns
+
+  def __setstate__(self, state):
+    self._name = state[0]
+    self._exit_fns = state[1]
 
 
 def strip_name_scope(name, export_scope):
@@ -6939,6 +6969,8 @@ def _reconstruct_sequence_inputs(op_def, inputs, attrs):
 
 class _TensorIterator(object):
   """Iterates over the leading dim of a Tensor. Performs no error checks."""
+
+  __slots__ = ["_tensor", "_index", "_limit"]
 
   def __init__(self, tensor, dim0):
     self._tensor = tensor

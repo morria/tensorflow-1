@@ -11,6 +11,10 @@
 * C-API functions `TF_StringDecode`, `TF_StringEncode`, and
   `TF_StringEncodedSize` are no longer relevant and have been removed; see
   core/platform/ctstring.h for string access/modification in C.
+* In batching library, rename parameter
+  SharedBatchScheduler::QueueOptions::max_batch_size to a more accurate name
+  (input_batch_size_limit) for a recent feature to enable split of large batch
+  sizes.
 
 ## Known Caveats
 
@@ -27,7 +31,11 @@
 * <IF A CHANGE CLOSES A GITHUB ISSUE, IT SHOULD BE DOCUMENTED HERE>
 * <NOTES SHOULD BE GROUPED PER AREA>
 * TF Core:
-    * <ADD RELEASE NOTES HERE>
+  * <ADD RELEASE NOTES HERE>
+  * `tf.Tensor` is now a subclass of `typing.Generic`, allowing type annotations
+    to be parameterized by dtype: `tf.Tensor[tf.Int32]`. This requires Python 3,
+    and will become fully compatible with static type checkers in the future.
+
 * `tf.data`:
     * Added optional `exclude_cols` parameter to CsvDataset. This parameter is
   the complement of `select_cols`; at most one of these should be specified.
@@ -50,6 +58,9 @@
 *   Tracing and Debugging:
     * <ADD RELEASE NOTES HERE>
 *   Other:
+    * We have replaced uses of "whitelist" with "allowlist" where possible.
+  Please see https://developers.google.com/style/word-list#blacklist for more
+  context.
     * <ADD RELEASE NOTES HERE>
 
 ## Thanks to our Contributors

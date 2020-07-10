@@ -157,6 +157,7 @@ filegroup(
     name = "OpBaseTdFiles",
     srcs = [
         "include/mlir/Dialect/Affine/IR/AffineOpsBase.td",
+        "include/mlir/Dialect/StandardOps/IR/StandardOpsBase.td",
         "include/mlir/IR/OpBase.td",
     ],
 )
@@ -178,6 +179,7 @@ filegroup(
         "include/mlir/Dialect/Affine/IR/AffineMemoryOpInterfaces.td",
         "include/mlir/Dialect/Affine/IR/AffineOps.td",
         "include/mlir/Dialect/Affine/IR/AffineOpsBase.td",
+        "include/mlir/Interfaces/ControlFlowInterfaces.td",
         "include/mlir/Interfaces/LoopLikeInterface.td",
         "include/mlir/Interfaces/SideEffectInterfaces.td",
         ":OpBaseTdFiles",
@@ -397,6 +399,7 @@ filegroup(
         "include/mlir/Interfaces/CallInterfaces.td",
         "include/mlir/Interfaces/ControlFlowInterfaces.td",
         "include/mlir/Interfaces/SideEffectInterfaces.td",
+        "include/mlir/Interfaces/VectorUnrollInterface.td",
         "include/mlir/Interfaces/ViewLikeInterface.td",
         ":OpBaseTdFiles",
     ],
@@ -655,6 +658,17 @@ cc_library(
 )
 
 cc_library(
+    name = "VectorUnrollInterface",
+    srcs = ["lib/Interfaces/VectorUnrollInterface.cpp"],
+    hdrs = ["include/mlir/Interfaces/VectorUnrollInterface.h"],
+    includes = ["include"],
+    deps = [
+        ":IR",
+        ":VectorUnrollInterfaceIncGen",
+    ],
+)
+
+cc_library(
     name = "ViewLikeInterface",
     srcs = ["lib/Interfaces/ViewLikeInterface.cpp"],
     hdrs = ["include/mlir/Interfaces/ViewLikeInterface.h"],
@@ -852,6 +866,7 @@ cc_library(
         ":SideEffectInterfaces",
         ":StandardOpsIncGen",
         ":Support",
+        ":VectorUnrollInterface",
         ":ViewLikeInterface",
         "@llvm-project//llvm:Support",
     ],
@@ -916,6 +931,7 @@ cc_library(
         ":Support",
         ":VectorOpsIncGen",
         ":VectorTransformPatternsIncGen",
+        ":VectorUnrollInterface",
         "@llvm-project//llvm:Support",
     ],
 )
@@ -2116,6 +2132,26 @@ gentbl(
     ],
     tblgen = ":mlir-tblgen",
     td_file = "include/mlir/Interfaces/LoopLikeInterface.td",
+    td_srcs = [
+        ":OpBaseTdFiles",
+    ],
+)
+
+gentbl(
+    name = "VectorUnrollInterfaceIncGen",
+    strip_include_prefix = "include",
+    tbl_outs = [
+        (
+            "-gen-op-interface-decls",
+            "include/mlir/Interfaces/VectorUnrollInterface.h.inc",
+        ),
+        (
+            "-gen-op-interface-defs",
+            "include/mlir/Interfaces/VectorUnrollInterface.cpp.inc",
+        ),
+    ],
+    tblgen = ":mlir-tblgen",
+    td_file = "include/mlir/Interfaces/VectorUnrollInterface.td",
     td_srcs = [
         ":OpBaseTdFiles",
     ],
@@ -3326,6 +3362,19 @@ gentbl(
             "-gen-op-defs",
             "include/mlir/Dialect/Linalg/IR/LinalgStructuredOps.cpp.inc",
         ),
+    ],
+    tblgen = ":mlir-tblgen",
+    td_file = "include/mlir/Dialect/Linalg/IR/LinalgStructuredOps.td",
+    td_srcs = [
+        ":LinalgStructuredOpsTdFiles",
+        "include/mlir/Dialect/Linalg/IR/LinalgNamedStructuredOps.td",
+    ],
+)
+
+gentbl(
+    name = "LinalgStructuredInterfacesIncGen",
+    strip_include_prefix = "include",
+    tbl_outs = [
         (
             "-gen-op-interface-decls",
             "include/mlir/Dialect/Linalg/IR/LinalgStructuredOpsInterfaces.h.inc",
@@ -3336,10 +3385,9 @@ gentbl(
         ),
     ],
     tblgen = ":mlir-tblgen",
-    td_file = "include/mlir/Dialect/Linalg/IR/LinalgStructuredOps.td",
+    td_file = "include/mlir/Dialect/Linalg/IR/LinalgStructuredOpsInterface.td",
     td_srcs = [
         ":LinalgStructuredOpsTdFiles",
-        "include/mlir/Dialect/Linalg/IR/LinalgNamedStructuredOps.td",
     ],
 )
 
@@ -3469,6 +3517,7 @@ cc_library(
         ":IR",
         ":LinalgNamedStructuredOpsIncGen",
         ":LinalgOpsIncGen",
+        ":LinalgStructuredInterfacesIncGen",
         ":LinalgStructuredOpsIncGen",
         ":Parser",
         ":SideEffectInterfaces",
@@ -3546,6 +3595,7 @@ filegroup(
     name = "VectorOpsTdFiles",
     srcs = [
         "include/mlir/Dialect/Vector/VectorOps.td",
+        "include/mlir/Interfaces/VectorUnrollInterface.td",
         ":AffineOpsTdFiles",
         ":OpBaseTdFiles",
     ],
@@ -3675,6 +3725,7 @@ exports_files(
         "include/mlir/Interfaces/ControlFlowInterfaces.h",
         "include/mlir/Interfaces/ControlFlowInterfaces.td",
         "include/mlir/Interfaces/SideEffectInterfaces.td",
+        "include/mlir/Interfaces/VectorUnrollInterface.td",
         "include/mlir/Interfaces/ViewLikeInterface.td",
         "include/mlir/Dialect/LLVMIR/LLVMOpBase.td",
         "include/mlir/Dialect/StandardOps/IR/Ops.td",

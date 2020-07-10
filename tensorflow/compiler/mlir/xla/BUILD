@@ -91,7 +91,6 @@ cc_library(
         "//tensorflow/compiler/mlir/tensorflow:convert_type",
         "//tensorflow/compiler/mlir/tensorflow:export_tf_dialect_op",
         "//tensorflow/compiler/mlir/tensorflow:lower_tf_lib",
-        "//tensorflow/compiler/mlir/tensorflow:tensorflow_ops_inc_gen",
         "//tensorflow/compiler/mlir/tensorflow:translate_utils",
         "//tensorflow/compiler/tf2xla:xla_compiler",
         "//tensorflow/compiler/xla/client:xla_builder",
@@ -116,9 +115,9 @@ cc_library(
 )
 
 cc_library(
-    name = "xla_hlo_to_lhlo_with_xla",
-    srcs = ["transforms/xla_hlo_to_lhlo_with_xla.cc"],
-    hdrs = ["transforms/xla_hlo_to_lhlo_with_xla.h"],
+    name = "mhlo_to_lhlo_with_xla",
+    srcs = ["transforms/mhlo_to_lhlo_with_xla.cc"],
+    hdrs = ["transforms/mhlo_to_lhlo_with_xla.h"],
     deps = [
         ":hlo_module_importer",
         ":hlo_utils",
@@ -341,23 +340,23 @@ tf_native_cc_binary(
     ],
 )
 
-genrule(
+gentbl(
     name = "operator_writer_inc",
-    srcs = [
+    tbl_outs = [("", "operator_writers.inc")],
+    tblgen = ":operator_writer_gen",
+    td_file = "//tensorflow/compiler/mlir/hlo:include/mlir-hlo/Dialect/mhlo/IR/hlo_ops.td",
+    td_relative_includes = [
+        "../hlo/include",
+    ],
+    td_srcs = [
+        "@llvm-project//mlir:include/mlir/IR/OpBase.td",
         "@llvm-project//mlir:include/mlir/Interfaces/InferTypeOpInterface.td",
         "@llvm-project//mlir:include/mlir/Interfaces/SideEffectInterfaces.td",
-        "@llvm-project//mlir:include/mlir/IR/OpBase.td",
         "//tensorflow/compiler/mlir/hlo:hlo_ops_td_files",
-        "//tensorflow/compiler/mlir/hlo:include/mlir-hlo/Dialect/mhlo/IR/hlo_ops.td",
+        # Any file in this directory is OK: this will force the current path to exist so
+        # that the relative path can be resolved.
+        "BUILD",
     ],
-    outs = ["operator_writers.inc"],
-    cmd = ("$(location :operator_writer_gen) " +
-           "-I external/llvm-project/mlir/include " +
-           "-I tensorflow/compiler/mlir " +
-           "-I tensorflow/compiler/mlir/hlo/include " +
-           "$(location //tensorflow/compiler/mlir/hlo:include/mlir-hlo/Dialect/mhlo/IR/hlo_ops.td) " +
-           " -o $@"),
-    tools = [":operator_writer_gen"],
 )
 
 cc_library(
@@ -366,28 +365,28 @@ cc_library(
         "//tensorflow/compiler/mlir:__subpackages__",
     ],
     deps = [
-        ":xla_hlo_to_lhlo_with_xla",
+        ":mhlo_to_lhlo_with_xla",
         ":xla_legalize_tf",
         ":xla_legalize_tf_with_tf2xla",
         "//tensorflow/compiler/mlir/hlo",
         "//tensorflow/compiler/mlir/hlo:chlo_legalize_to_hlo",
         "//tensorflow/compiler/mlir/hlo:hlo_dialect_registration",
         "//tensorflow/compiler/mlir/hlo:hlo_legalize_to_lhlo",
+        "//tensorflow/compiler/mlir/hlo:legalize_control_flow",
+        "//tensorflow/compiler/mlir/hlo:legalize_tanh_to_approximation",
+        "//tensorflow/compiler/mlir/hlo:legalize_to_linalg",
+        "//tensorflow/compiler/mlir/hlo:legalize_to_standard",
         "//tensorflow/compiler/mlir/hlo:lhlo",
         "//tensorflow/compiler/mlir/hlo:lhlo_copy_removal",
         "//tensorflow/compiler/mlir/hlo:lhlo_fuse_linalg",
         "//tensorflow/compiler/mlir/hlo:lhlo_legalize_to_affine",
         "//tensorflow/compiler/mlir/hlo:lhlo_legalize_to_gpu",
         "//tensorflow/compiler/mlir/hlo:lhlo_legalize_to_parallel_loops",
-        "//tensorflow/compiler/mlir/hlo:xla_hlo_fusion",
-        "//tensorflow/compiler/mlir/hlo:xla_legalize_control_flow",
-        "//tensorflow/compiler/mlir/hlo:xla_legalize_tanh_to_approximation",
-        "//tensorflow/compiler/mlir/hlo:xla_legalize_to_linalg",
-        "//tensorflow/compiler/mlir/hlo:xla_legalize_to_standard",
-        "//tensorflow/compiler/mlir/hlo:xla_lower",
-        "//tensorflow/compiler/mlir/hlo:xla_sink_constants_to_control_flow",
-        "//tensorflow/compiler/mlir/hlo:xla_test_passes",
-        "//tensorflow/compiler/mlir/hlo:xla_transform_unranked_hlo",
+        "//tensorflow/compiler/mlir/hlo:mhlo_fusion",
+        "//tensorflow/compiler/mlir/hlo:mhlo_to_mhlo_lowering_patterns",
+        "//tensorflow/compiler/mlir/hlo:sink_constants_to_control_flow",
+        "//tensorflow/compiler/mlir/hlo:test_passes",
+        "//tensorflow/compiler/mlir/hlo:transform_unranked_hlo",
     ],
 )
 

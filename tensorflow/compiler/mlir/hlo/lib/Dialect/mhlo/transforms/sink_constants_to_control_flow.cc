@@ -23,7 +23,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/IR/hlo_ops.h"
 
 namespace mlir {
-namespace xla_hlo {
+namespace mhlo {
 
 namespace {
 
@@ -71,7 +71,7 @@ class SinkConstantsToControlFlow
 };
 
 static mlir::PassRegistration<SinkConstantsToControlFlow> pass(
-    "xla-hlo-sink-constants-to-control-flow",
+    "mhlo-sink-constants-to-control-flow",
     "Sink constants implicitly captured in control flow regions. This is "
     "necessary to export to XLA.");
 
@@ -81,5 +81,5 @@ std::unique_ptr<OperationPass<FuncOp>> createSinkConstantsToControlFlowPass() {
   return std::make_unique<SinkConstantsToControlFlow>();
 }
 
-}  // namespace xla_hlo
+}  // namespace mhlo
 }  // namespace mlir
